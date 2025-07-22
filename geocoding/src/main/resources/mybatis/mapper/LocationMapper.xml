@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<mapper namespace="com.example.geocode.mapper.LocationMapper">
+        <select id="findByAllConcatAddress" resultType="com.example.geocode.entity.Location">
+            SELECT * FROM location
+            WHERE
+            CONCAT(
+                IFNULL(adname, ''),
+                IFNULL(business_a, ''),
+                IFNULL(name, '')
+            ) LIKE CONCAT('%', #{address}, '%')
+        </select>
+
+        <select id="findByAddress" resultType="com.example.geocode.entity.Location">
+            SELECT * FROM location
+            WHERE
+            CONCAT(
+                IFNULL(adname, ''),
+                IFNULL(streetname, ''),
+                IFNULL(name, '')
+            ) LIKE CONCAT('%', #{address}, '%') LIMIT 1
+        </select>
+
+    <select id="findByAllAddress" resultType="com.example.geocode.entity.Location">
+        SELECT * FROM location
+        WHERE
+        adname = #{adName}
+        AND streetname = #{streetName}
+        AND name LIKE CONCAT('%', #{Name}, '%')
+        LIMIT 1
+    </select>
+
+    <select id="findacAddress" resultType="com.example.geocode.entity.Location">
+        SELECT * FROM location
+        WHERE
+        adname = #{adName}
+        AND streetname = #{streetName}
+        AND name = #{Name}
+        LIMIT 1
+    </select>
+
+    <select id="findMoteAddress" resultType="com.example.geocode.entity.Location">
+        select * from location
+        where
+        name like concat('%', #{Name}, '%')
+        limit 1
+    </select>
+
+</mapper>

@@ -20,6 +20,7 @@ import javax.annotation.PostConstruct;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.*;
@@ -29,6 +30,15 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class RenewFileServiceImpl implements ExcelFileService {
 
     private static final Logger logger = LoggerFactory.getLogger(RenewFileServiceImpl.class);
+
+    // 模板字段映射
+    private static final Map<String, Integer> TEMPLATE_COLUMNS = new HashMap<>();
+    static {
+        TEMPLATE_COLUMNS.put("序号", 0);
+        TEMPLATE_COLUMNS.put("区县", 1);
+        TEMPLATE_COLUMNS.put("乡镇街道", 2);
+        TEMPLATE_COLUMNS.put("地名地址", 3);
+    }
 
     @Value("${geocode.api.gaode.rate:3}")
     private int maxConcurrentRequests;
@@ -45,7 +55,6 @@ public class RenewFileServiceImpl implements ExcelFileService {
     @Value("${geocode.thread.pool.size:8}")
     private int threadPoolSize;
 
-//    @Value("${geocode.city.prefix:哈尔滨市}")
     private String cityPrefix = "哈尔滨市";
 
     private final GeocodingServiceInvoker geocodingServiceInvoker;
@@ -86,6 +95,11 @@ public class RenewFileServiceImpl implements ExcelFileService {
                 return createEmptyResultFile();
             }
 
+            // 分析表头结构
+            XSSFRow headerRow = sheet.getRow(0);
+            HeaderAnalysis headerAnalysis = analyzeHeader(headerRow);
+            logger.info("表头分析完成，原始列数: {}, 模板列映射: {}", headerAnalysis.totalColumns, headerAnalysis.templateColumnIndexes);
+
             // 安全读取所有行索引
             List<Integer> rowIndexes = new ArrayList<>();
             for (int i = 1; i < physicalRowCount; i++) {
@@ -110,7 +124,7 @@ public class RenewFileServiceImpl implements ExcelFileService {
                 final int endIdx = Math.min(i + batchSize, totalIndexes);
 
                 futures.add(CompletableFuture.runAsync(() -> {
-                    processBatch(sheet, rowIndexes.subList(startIdx, endIdx), addressCache,
+                    processBatch(sheet, rowIndexes.subList(startIdx, endIdx), headerAnalysis, addressCache,
                             resultsQueue, countGaodeNum, countTiandituNum);
                 }, executor));
             }
@@ -134,7 +148,7 @@ public class RenewFileServiceImpl implements ExcelFileService {
             resultsQueue.drainTo(resultList);
             logger.info("结果队列大小: {}", resultList.size());
 
-            return createResultFile(resultList);
+            return createResultFile(resultList, headerAnalysis);
         } catch (TimeoutException e) {
             logger.error("处理超时: {}", e.getMessage(), e);
             throw new RuntimeException("处理超时，请减少批量大小或增加超时时间", e);
@@ -144,7 +158,83 @@ public class RenewFileServiceImpl implements ExcelFileService {
         }
     }
 
-    private void processBatch(XSSFSheet sheet, List<Integer> rowIndexes,
+    /**
+     * 表头分析结果类
+     */
+    private static class HeaderAnalysis {
+        public final int totalColumns;
+        public final Map<String, Integer> templateColumnIndexes;
+        public final String[] originalHeaders;
+        public final String[] resultHeaders;
+
+        public HeaderAnalysis(int totalColumns, Map<String, Integer> templateColumnIndexes, 
+                             String[] originalHeaders, String[] resultHeaders) {
+            this.totalColumns = totalColumns;
+            this.templateColumnIndexes = templateColumnIndexes;
+            this.originalHeaders = originalHeaders;
+            this.resultHeaders = resultHeaders;
+        }
+    }
+
+    /**
+     * 分析表头结构，确定原始字段和模板字段的位置
+     */
+    private HeaderAnalysis analyzeHeader(XSSFRow headerRow) {
+        if (headerRow == null) {
+            throw new RuntimeException("表头行不能为空");
+        }
+
+        int totalColumns = headerRow.getLastCellNum();
+        String[] originalHeaders = new String[totalColumns];
+        Map<String, Integer> templateColumnIndexes = new HashMap<>();
+
+        // 读取原始表头
+        for (int i = 0; i < totalColumns; i++) {
+            XSSFCell cell = headerRow.getCell(i);
+            String headerValue = safeGetCellValue(cell);
+            originalHeaders[i] = headerValue;
+            
+            // 检查是否是模板字段
+            if (TEMPLATE_COLUMNS.containsKey(headerValue)) {
+                templateColumnIndexes.put(headerValue, i);
+            }
+        }
+
+        // 验证必需的模板字段是否存在
+        List<String> missingFields = new ArrayList<>();
+        for (String requiredField : TEMPLATE_COLUMNS.keySet()) {
+            if (!templateColumnIndexes.containsKey(requiredField)) {
+                missingFields.add(requiredField);
+                logger.warn("未找到必需的模板字段: {}", requiredField);
+            }
+        }
+        
+        // 如果缺少关键字段，抛出异常
+        if (missingFields.contains("地名地址")) {
+            throw new RuntimeException("缺少必需的模板字段：地名地址。请确保Excel文件包含此字段。");
+        }
+
+        // 构建结果表头：原始字段 + 地理编码结果字段
+        List<String> resultHeaderList = new ArrayList<>();
+        
+        // 添加原始字段
+        for (String header : originalHeaders) {
+            resultHeaderList.add(header);
+        }
+        
+        // 添加地理编码结果字段
+        resultHeaderList.add("结果地址");
+        resultHeaderList.add("匹配等级");
+        resultHeaderList.add("来源");
+        resultHeaderList.add("经度");
+        resultHeaderList.add("纬度");
+
+        String[] resultHeaders = resultHeaderList.toArray(new String[0]);
+
+        return new HeaderAnalysis(totalColumns, templateColumnIndexes, originalHeaders, resultHeaders);
+    }
+
+    private void processBatch(XSSFSheet sheet, List<Integer> rowIndexes, HeaderAnalysis headerAnalysis,
                               Map<String, ApiResult> addressCache,
                               BlockingQueue<String[]> resultsQueue,
                               AtomicInteger countGaodeNum,
@@ -159,41 +249,43 @@ public class RenewFileServiceImpl implements ExcelFileService {
             }
 
             try {
-                String[] rowData = processSingleRow(row, addressCache, countGaodeNum, countTiandituNum);
+                String[] rowData = processSingleRow(row, headerAnalysis, addressCache, countGaodeNum, countTiandituNum);
                 if (rowData != null) {
                     resultsQueue.put(rowData);
                 }
             } catch (Exception e) {
                 logger.error("处理行{}时出错: {}", rowNum, e.getMessage(), e);
-                resultsQueue.offer(createErrorRowData(row));
+                resultsQueue.offer(createErrorRowData(row, headerAnalysis));
             }
         }
         logger.debug("批次处理完成");
     }
 
-    private String[] processSingleRow(XSSFRow row,
+    private String[] processSingleRow(XSSFRow row, HeaderAnalysis headerAnalysis,
                                       Map<String, ApiResult> addressCache,
                                       AtomicInteger countGaodeNum,
                                       AtomicInteger countTiandituNum) {
         try {
             logger.debug("处理行: {}", row.getRowNum());
 
-            String[] data = new String[9];
+            // 创建结果数组：原始字段数 + 5个地理编码结果字段
+            String[] data = new String[headerAnalysis.totalColumns + 5];
 
-            // 安全获取单元格值
-            data[0] = safeGetCellValue(row.getCell(0));
-            data[1] = safeGetCellValue(row.getCell(1));
-            String adName = data[1];
-            data[2] = safeGetCellValue(row.getCell(2));
-            String streetName = data[2];
-            data[3] = safeGetCellValue(row.getCell(3));
-            String address = data[3];
+            // 复制原始字段数据
+            for (int i = 0; i < headerAnalysis.totalColumns; i++) {
+                data[i] = safeGetCellValue(row.getCell(i));
+            }
+
+            // 从模板字段中提取地理编码所需的信息
+            String adName = getTemplateFieldValue(row, headerAnalysis, "区县");
+            String streetName = getTemplateFieldValue(row, headerAnalysis, "乡镇街道");
+            String address = getTemplateFieldValue(row, headerAnalysis, "地名地址");
 
             logger.debug("提取地址数据: 区县={}, 街道={}, 地址={}", adName, streetName, address);
 
             if (address == null || address.trim().isEmpty()) {
                 logger.debug("行{}地址为空", row.getRowNum());
-                data[6] = "空地址";
+                data[headerAnalysis.totalColumns + 2] = "空地址";
                 return data;
             }
 
@@ -205,7 +297,7 @@ public class RenewFileServiceImpl implements ExcelFileService {
             ApiResult cachedResult = addressCache.get(cacheKey);
             if (cachedResult != null) {
                 logger.debug("从缓存获取结果: {}", cacheKey);
-                fillResultData(data, cachedResult, countGaodeNum, countTiandituNum);
+                fillResultData(data, headerAnalysis.totalColumns, cachedResult, countGaodeNum, countTiandituNum);
                 return data;
             }
 
@@ -228,10 +320,10 @@ public class RenewFileServiceImpl implements ExcelFileService {
                 if (result != null && result.getLng() != null && result.getLat() != null) {
                     logger.debug("获取API结果: {},{}, 来源={}", result.getLng(), result.getLat(), result.getSource());
                     addressCache.put(cacheKey, result);
-                    fillResultData(data, result, countGaodeNum, countTiandituNum);
+                    fillResultData(data, headerAnalysis.totalColumns, result, countGaodeNum, countTiandituNum);
                 } else {
                     logger.warn("无地理编码结果");
-                    data[6] = "无结果";
+                    data[headerAnalysis.totalColumns + 2] = "无结果";
                 }
             } finally {
                 apiRateLimiter.release();
@@ -240,8 +332,20 @@ public class RenewFileServiceImpl implements ExcelFileService {
             return data;
         } catch (Exception e) {
             logger.error("处理单行数据时出错", e);
-            return createErrorRowData(row);
+            return createErrorRowData(row, headerAnalysis);
         }
+    }
+
+    /**
+     * 从行中获取指定模板字段的值
+     */
+    private String getTemplateFieldValue(XSSFRow row, HeaderAnalysis headerAnalysis, String fieldName) {
+        Integer columnIndex = headerAnalysis.templateColumnIndexes.get(fieldName);
+        if (columnIndex == null) {
+            logger.warn("未找到模板字段: {}", fieldName);
+            return "";
+        }
+        return safeGetCellValue(row.getCell(columnIndex));
     }
 
     // 精确的速率控制类
@@ -306,23 +410,23 @@ public class RenewFileServiceImpl implements ExcelFileService {
         }
     }
 
-    private void fillResultData(String[] data, ApiResult result,
+    private void fillResultData(String[] data, int originalColumnsCount, ApiResult result,
                                 AtomicInteger countGaodeNum, AtomicInteger countTiandituNum) {
         if (result == null) {
-            data[4] = "";
-            data[5] = "";
-            data[6] = "";
-            data[7] = "";
-            data[8] = "无结果";
+            data[originalColumnsCount] = "";
+            data[originalColumnsCount + 1] = "";
+            data[originalColumnsCount + 2] = "";
+            data[originalColumnsCount + 3] = "";
+            data[originalColumnsCount + 4] = "无结果";
             return;
         }
 
         if (result.getLng() != null && result.getLat() != null) {
-            data[4] = result.getFormatted_address() != null ? result.getFormatted_address() : "未知地名";
-            data[5] = result.getLevel() != null ? result.getLevel() : "未知等级";
-            data[6] = result.getSource() != null ? result.getSource() : "未知来源";
-            data[7] = result.getLng();
-            data[8] = result.getLat();
+            data[originalColumnsCount] = result.getFormatted_address() != null ? result.getFormatted_address() : "未知地名";
+            data[originalColumnsCount + 1] = result.getLevel() != null ? result.getLevel() : "未知等级";
+            data[originalColumnsCount + 2] = result.getSource() != null ? result.getSource() : "未知来源";
+            data[originalColumnsCount + 3] = result.getLng();
+            data[originalColumnsCount + 4] = result.getLat();
 
             if ("gaode".equals(result.getSource())) {
                 countGaodeNum.incrementAndGet();
@@ -330,11 +434,11 @@ public class RenewFileServiceImpl implements ExcelFileService {
                 countTiandituNum.incrementAndGet();
             }
         } else {
-            data[4] = "";
-            data[5] = "";
-            data[6] = "";
-            data[7] = "";
-            data[8] = "无结果";
+            data[originalColumnsCount] = "";
+            data[originalColumnsCount + 1] = "";
+            data[originalColumnsCount + 2] = "";
+            data[originalColumnsCount + 3] = "";
+            data[originalColumnsCount + 4] = "无结果";
         }
     }
 
@@ -355,21 +459,23 @@ public class RenewFileServiceImpl implements ExcelFileService {
         return null;
     }
 
-    private String[] createErrorRowData(XSSFRow row) {
-        String[] data = new String[9];
+    private String[] createErrorRowData(XSSFRow row, HeaderAnalysis headerAnalysis) {
+        String[] data = new String[headerAnalysis.totalColumns + 5];
         try {
-            data[0] = row.getCell(0) != null ? getCellValue(row.getCell(0)) : "";
-            data[1] = row.getCell(1) != null ? getCellValue(row.getCell(1)) : "";
-            data[2] = row.getCell(2) != null ? getCellValue(row.getCell(2)) : "";
-            data[3] = row.getCell(3) != null ? getCellValue(row.getCell(3)) : "";
+            // 复制原始数据
+            for (int i = 0; i < headerAnalysis.totalColumns; i++) {
+                data[i] = row.getCell(i) != null ? getCellValue(row.getCell(i)) : "";
+            }
         } catch (Exception e) {
             logger.error("创建错误行数据时出错", e);
         }
-        data[4] = "";
-        data[5] = "";
-        data[6] = "";
-        data[7] = "";
-        data[8] = "处理错误";
+        
+        // 设置地理编码结果字段为空
+        data[headerAnalysis.totalColumns] = "";
+        data[headerAnalysis.totalColumns + 1] = "";
+        data[headerAnalysis.totalColumns + 2] = "";
+        data[headerAnalysis.totalColumns + 3] = "";
+        data[headerAnalysis.totalColumns + 4] = "处理错误";
         return data;
     }
 
@@ -400,7 +506,7 @@ public class RenewFileServiceImpl implements ExcelFileService {
         return true;
     }
 
-    private byte[] createResultFile(List<String[]> data) throws IOException {
+    private byte[] createResultFile(List<String[]> data, HeaderAnalysis headerAnalysis) throws IOException {
         logger.info("创建结果文件，包含{}行数据", data.size());
 
         try (XSSFWorkbook workbook = new XSSFWorkbook();
@@ -409,10 +515,9 @@ public class RenewFileServiceImpl implements ExcelFileService {
             XSSFSheet sheet = workbook.createSheet("结果");
 
             // 创建标题行
-            String[] headers = {"序号", "区县", "乡镇街道", "地名地址", "结果地址", "匹配等级", "来源", "经度", "纬度"};
             XSSFRow headerRow = sheet.createRow(0);
-            for (int i = 0; i < headers.length; i++) {
-                headerRow.createCell(i).setCellValue(headers[i]);
+            for (int i = 0; i < headerAnalysis.resultHeaders.length; i++) {
+                headerRow.createCell(i).setCellValue(headerAnalysis.resultHeaders[i]);
             }
 
             // 填充数据

@@ -291,8 +291,8 @@ logging.pattern.file=%d{ISO8601} [%thread] %-5level %logger{36} - %msg%n
 
 ## 📞 联系我们
 
-- 项目主页: [https://github.com/Sin9ular37/geocode](https://github.com/Sin9ular37/geocode)
-- 问题反馈: [Issues](https://github.com/Sin9ular37/geocode/issues)
+- 项目主页: [https://github.com/Sin9ular37/geocoding-service](https://github.com/Sin9ular37/geocoding-service)
+- 问题反馈: [Issues](https://github.com/Sin9ular37/geocoding-service/issues)
 - 邮箱: shiqouhz@163.com
 
 ## 🙏 致谢

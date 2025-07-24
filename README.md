@@ -291,9 +291,9 @@ logging.pattern.file=%d{ISO8601} [%thread] %-5level %logger{36} - %msg%n
 
 ## 📞 联系我们
 
-- 项目主页: [https://github.com/your-username/geocode](https://github.com/your-username/geocode)
-- 问题反馈: [Issues](https://github.com/your-username/geocode/issues)
-- 邮箱: your-email@example.com
+- 项目主页: [https://github.com/Sin9ular37/geocode](https://github.com/Sin9ular37/geocode)
+- 问题反馈: [Issues](https://github.com/Sin9ular37/geocode/issues)
+- 邮箱: shiqouhz@163.com
 
 ## 🙏 致谢
 
